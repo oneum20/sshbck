@@ -41,17 +41,11 @@ func (s SSHBuf) Read() {
 	buf := make([]byte, 1024)
 	for {
 		n, err := s.Stdout.Read(buf)
-		if err != nil {
-			log.Fatal(err)
+		if err != nil && err != io.EOF {
+			log.Println("io read error: ", err)
+			close(s.Data)
 		}
 
 		s.Data <- buf[:n]
-	}
-}
-
-func (s SSHBuf) Write(input []byte) {
-	_, err := s.Stdin.Write(input)
-	if err != nil {
-		log.Fatal(err)
 	}
 }
