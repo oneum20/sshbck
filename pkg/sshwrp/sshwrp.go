@@ -19,22 +19,22 @@ type Config struct {
 	Addr         string
 }
 
-func (c Config) NewConn() *ssh.Client {
+func (c Config) NewConn() (*ssh.Client, error) {
 	conn, err := ssh.Dial(c.Protocol, c.Addr, c.ServerConfig)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 
-	return conn
+	return conn, nil
 }
 
-func (c Config) NewSession(conn *ssh.Client) *ssh.Session {
+func (c Config) NewSession(conn *ssh.Client) (*ssh.Session, error) {
 	session, err := conn.NewSession()
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 
-	return session
+	return session, nil
 }
 
 func (s SSHBuf) Read() {

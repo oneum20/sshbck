@@ -1,7 +1,7 @@
 package websocket
 
 import (
-	"fmt"
+	"encoding/json"
 	"log"
 	"net/http"
 
@@ -11,24 +11,37 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func setupSSH(sbf *sshwrp.SSHBuf) {
+// setup ssh connection
+func setupSSH(sbf *sshwrp.SSHBuf, scf map[string]interface{}, ws *websocket.Conn) {
+	addr := scf["host"].(string) + ":" + scf["port"].(string)
+
 	serverConfig := &ssh.ClientConfig{
-		User: "vagrant",
+		User: scf["username"].(string),
 		Auth: []ssh.AuthMethod{
-			ssh.Password("vagrant"),
+			ssh.Password(scf["password"].(string)),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 	config := sshwrp.Config{
 		ServerConfig: serverConfig,
 		Protocol:     "tcp",
-		Addr:         "localhost:2222",
+		Addr:         addr,
 	}
 
-	conn := config.NewConn()
+	conn, err := config.NewConn()
+	if err != nil {
+		log.Println(err)
+		ws.WriteMessage(websocket.TextMessage, []byte(">> "+err.Error()+"\n\r"))
+		return
+	}
 	defer conn.Close()
 
-	session := config.NewSession(conn)
+	session, err := config.NewSession(conn)
+	if err != nil {
+		log.Println(err)
+		ws.WriteMessage(websocket.TextMessage, []byte(">> "+err.Error()+"\n\r"))
+		return
+	}
 	defer session.Close()
 
 	session.RequestPty("xterm", 80, 50, ssh.TerminalModes{})
@@ -50,19 +63,35 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+// websocket handler
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		fmt.Println("WebSocket upgrade error:", err)
+		log.Println("WebSocket upgrade error:", err)
 		return
 	}
 	defer conn.Close()
 
-	fmt.Println("WebSocket connection established.")
+	log.Println("WebSocket connection established.")
+	conn.WriteMessage(websocket.TextMessage, []byte(">> Websocket connection established.\n\r"))
+
+	// get remote ssh server info
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		log.Println("Read error:", err)
+		return
+	}
+
+	var sshInfo map[string]interface{}
+	if err := json.Unmarshal(msg, &sshInfo); err != nil {
+		log.Println("ssh connection error :", err)
+		conn.WriteMessage(websocket.TextMessage, []byte(">> ssh connection error : "+err.Error()))
+		return
+	}
 
 	sbf := &sshwrp.SSHBuf{Data: make(chan []byte)}
 
-	go setupSSH(sbf)
+	go setupSSH(sbf, sshInfo, conn)
 
 	go func() {
 		for {
@@ -83,10 +112,13 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			fmt.Println("Read error:", err)
+			log.Println("Read error:", err)
 			return
 		}
-		sbf.Stdin.Write(msg)
+		if _, err := sbf.Stdin.Write(msg); err != nil {
+			log.Println("Write error:", err)
+			return
+		}
 	}
 
 }
