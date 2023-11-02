@@ -1,0 +1,30 @@
+name: build
+on: [workflow_call]
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - name: checkout code
+              uses: actions/checkout@4
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v1
+
+            - name: Setup Go
+              uses: actions/setup-go@v4
+              with:
+                go-version-file: 'go.mod'
+        
+            - name: build go
+              run: |
+                go mod tidy
+                GO111MODULE=on GOARCH=amd64 GOOS=linux go build -o sshbck ./cmd/main.go       
+        
+            - name: Build and push Docker image
+              id: docker_build
+              uses: docker/build-push-action@v4
+              with:
+                platforms: linux/amd64
+                context: .  
+                file: Dockerfile  
+                push: false
