@@ -11,6 +11,11 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+func isJson(s []byte) bool {
+	var js map[string]interface{}
+	return json.Unmarshal([]byte(s), &js) == nil
+}
+
 // setup ssh connection
 func setupSSH(sbf *sshwrp.SSHBuf, scf map[string]interface{}, ws *websocket.Conn) {
 	addr := scf["host"].(string) + ":" + scf["port"].(string)
@@ -44,7 +49,7 @@ func setupSSH(sbf *sshwrp.SSHBuf, scf map[string]interface{}, ws *websocket.Conn
 	}
 	defer session.Close()
 
-	session.RequestPty("xterm", 80, 50, ssh.TerminalModes{})
+	session.RequestPty("xterm", 22, 50, ssh.TerminalModes{})
 
 	sbf.Stdin, _ = session.StdinPipe()
 	sbf.Stdout, _ = session.StdoutPipe()
@@ -75,23 +80,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	log.Println("WebSocket connection established.")
 	conn.WriteMessage(websocket.TextMessage, []byte(">> Websocket connection established.\n\r"))
 
-	// get remote ssh server info
-	_, msg, err := conn.ReadMessage()
-	if err != nil {
-		log.Println("Read error:", err)
-		return
-	}
-
-	var sshInfo map[string]interface{}
-	if err := json.Unmarshal(msg, &sshInfo); err != nil {
-		log.Println("ssh connection error :", err)
-		conn.WriteMessage(websocket.TextMessage, []byte(">> ssh connection error : "+err.Error()))
-		return
-	}
-
 	sbf := &sshwrp.SSHBuf{Data: make(chan []byte)}
-
-	go setupSSH(sbf, sshInfo, conn)
 
 	go func() {
 		for {
@@ -115,10 +104,37 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			log.Println("Read error:", err)
 			return
 		}
-		if _, err := sbf.Stdin.Write(msg); err != nil {
-			log.Println("Write error:", err)
-			return
+
+		if isJson(msg) {
+			var data map[string]interface{}
+			if err := json.Unmarshal(msg, &data); err != nil {
+				log.Println("json parsing error: ", err)
+				continue
+			}
+
+			action, ok := data["action"].(string)
+			if !ok {
+				log.Println("action value is not a string : ", action)
+				continue
+			}
+
+			switch action {
+			case "connection":
+				go setupSSH(sbf, data, conn)
+			default:
+				log.Println("not supported action : ", action)
+			}
+		} else {
+			if sbf.Stdin == nil {
+				log.Println(">> Stdin is nil : ", msg)
+				continue
+			}
+			if _, err := sbf.Stdin.Write(msg); err != nil {
+				log.Println("Write error:", err)
+				return
+			}
 		}
+
 	}
 
 }
