@@ -19,6 +19,8 @@ func isJson(s []byte) bool {
 // setup ssh connection
 func setupSSH(sbf *sshwrp.SSHBuf, scf map[string]interface{}, ws *websocket.Conn) {
 	addr := scf["host"].(string) + ":" + scf["port"].(string)
+	cols := int(scf["cols"].(float64))
+	rows := int(scf["rows"].(float64))
 
 	serverConfig := &ssh.ClientConfig{
 		User: scf["username"].(string),
@@ -49,7 +51,7 @@ func setupSSH(sbf *sshwrp.SSHBuf, scf map[string]interface{}, ws *websocket.Conn
 	}
 	defer session.Close()
 
-	session.RequestPty("xterm", 22, 50, ssh.TerminalModes{})
+	session.RequestPty("xterm", rows, cols, ssh.TerminalModes{})
 
 	sbf.Stdin, _ = session.StdinPipe()
 	sbf.Stdout, _ = session.StdoutPipe()
