@@ -1,0 +1,8 @@
+name: main workflow
+on: [push]
+jobs:
+    build:
+        uses: ./.github/workflows/build.yml
+        secrets: inherit
+              
+            
