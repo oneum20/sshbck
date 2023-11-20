@@ -27,4 +27,7 @@ jobs:
                 platforms: linux/amd64
                 context: .  
                 file: Dockerfile  
-                push: false
+                push: true
+                tags: hanum20/sshbck:latest
+                username: {{secret.DOCKERHUB_USERNAME}}
+                password: {{secret.DOCKERHUB_PASSWORD}}
