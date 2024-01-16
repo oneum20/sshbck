@@ -4,13 +4,16 @@ import (
 	"io"
 	"log"
 
+	"sshbck/pkg/queue"
+
 	"golang.org/x/crypto/ssh"
 )
 
 type SSHBuf struct {
 	Stdin  io.WriteCloser
 	Stdout io.Reader
-	Data   chan []byte
+	Data   []byte
+	Q      *queue.Queue
 }
 
 type Config struct {
@@ -38,14 +41,16 @@ func (c Config) NewSession(conn *ssh.Client) (*ssh.Session, error) {
 }
 
 func (s SSHBuf) Read() {
-	buf := make([]byte, 1024)
+	buf := make([]byte, 4096)
 	for {
 		n, err := s.Stdout.Read(buf)
 		if err != nil && err != io.EOF {
 			log.Println("io read error: ", err)
-			close(s.Data)
+		}
+		if n == 0 {
+			continue
 		}
 
-		s.Data <- buf[:n]
+		s.Q.Push(buf[:n])
 	}
 }

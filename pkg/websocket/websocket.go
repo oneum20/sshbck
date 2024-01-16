@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 
+	"sshbck/pkg/queue"
 	"sshbck/pkg/sshwrp"
 
 	"github.com/gorilla/websocket"
@@ -18,6 +19,7 @@ func isJson(s []byte) bool {
 
 // setup ssh connection
 func setupSSH(sbf *sshwrp.SSHBuf, scf map[string]interface{}, ws *websocket.Conn) {
+	log.Println(scf)
 	addr := scf["host"].(string) + ":" + scf["port"].(string)
 	cols := int(scf["cols"].(float64))
 	rows := int(scf["rows"].(float64))
@@ -82,15 +84,12 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	log.Println("WebSocket connection established.")
 	conn.WriteMessage(websocket.TextMessage, []byte(">> Websocket connection established.\n\r"))
 
-	sbf := &sshwrp.SSHBuf{Data: make(chan []byte)}
+	sbf := &sshwrp.SSHBuf{Q: queue.NewQueue()}
 
 	go func() {
 		for {
-			if data, ok := <-sbf.Data; len(data) > 0 {
-				if !ok {
-					return
-				}
-				err := conn.WriteMessage(websocket.TextMessage, data)
+			if sbf.Q.Len() > 0 {
+				err := conn.WriteMessage(websocket.TextMessage, sbf.Q.Pop().([]byte))
 				if err != nil {
 					log.Println("websocket write error : ", err)
 					return
