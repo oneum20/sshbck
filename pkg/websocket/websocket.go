@@ -19,7 +19,7 @@ func isJson(s []byte) bool {
 
 // setup ssh connection
 func setupSSH(sbf *sshwrp.SSHBuf, scf map[string]interface{}, ws *websocket.Conn) {
-	log.Println(scf)
+	log.Println("connection info : ", scf)
 	addr := scf["host"].(string) + ":" + scf["port"].(string)
 	cols := int(scf["cols"].(float64))
 	rows := int(scf["rows"].(float64))
@@ -65,8 +65,6 @@ func setupSSH(sbf *sshwrp.SSHBuf, scf map[string]interface{}, ws *websocket.Conn
 }
 
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
@@ -89,7 +87,8 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		for {
 			if sbf.Q.Len() > 0 {
-				err := conn.WriteMessage(websocket.TextMessage, sbf.Q.Pop().([]byte))
+				data := sbf.Q.Pop().([]byte)
+				err := conn.WriteMessage(websocket.TextMessage, data)
 				if err != nil {
 					log.Println("websocket write error : ", err)
 					return

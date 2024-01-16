@@ -12,7 +12,6 @@ import (
 type SSHBuf struct {
 	Stdin  io.WriteCloser
 	Stdout io.Reader
-	Data   []byte
 	Q      *queue.Queue
 }
 
@@ -41,8 +40,8 @@ func (c Config) NewSession(conn *ssh.Client) (*ssh.Session, error) {
 }
 
 func (s SSHBuf) Read() {
-	buf := make([]byte, 4096)
 	for {
+		buf := make([]byte, 1024)
 		n, err := s.Stdout.Read(buf)
 		if err != nil && err != io.EOF {
 			log.Println("io read error: ", err)
