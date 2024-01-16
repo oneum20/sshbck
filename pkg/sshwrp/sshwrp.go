@@ -40,8 +40,8 @@ func (c Config) NewSession(conn *ssh.Client) (*ssh.Session, error) {
 }
 
 func (s SSHBuf) Read() {
+	buf := make([]byte, 1024)
 	for {
-		buf := make([]byte, 1024)
 		n, err := s.Stdout.Read(buf)
 		if err != nil && err != io.EOF {
 			log.Println("io read error: ", err)
@@ -51,5 +51,8 @@ func (s SSHBuf) Read() {
 		}
 
 		s.Q.Push(buf[:n])
+
+		// 버퍼 비우기
+		buf = make([]byte, 1024)
 	}
 }

@@ -87,8 +87,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		for {
 			if sbf.Q.Len() > 0 {
-				data := sbf.Q.Pop().([]byte)
-				err := conn.WriteMessage(websocket.TextMessage, data)
+				err := conn.WriteMessage(websocket.TextMessage, sbf.Q.Pop().([]byte))
 				if err != nil {
 					log.Println("websocket write error : ", err)
 					return
