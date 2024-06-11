@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 
 	"sshbck/pkg/queue"
 	"sshbck/pkg/sshwrp"
@@ -84,7 +85,9 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	sbf := &sshwrp.SSHBuf{Q: queue.NewQueue()}
 
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for {
 			if sbf.Q.Len() > 0 {
 				err := conn.WriteMessage(websocket.TextMessage, sbf.Q.Pop().([]byte))
@@ -92,45 +95,52 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 					log.Println("websocket write error : ", err)
 					return
 				}
+			} else {
+				time.Sleep(100 * time.Millisecond) // 루프 내에서 대기 추가
 			}
 		}
 
 	}()
 
 	for {
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			log.Println("Read error:", err)
+		select {
+		case <-done:
 			return
-		}
-
-		if isJson(msg) {
-			var data map[string]interface{}
-			if err := json.Unmarshal(msg, &data); err != nil {
-				log.Println("json parsing error: ", err)
-				continue
-			}
-
-			action, ok := data["action"].(string)
-			if !ok {
-				log.Println("action value is not a string : ", action)
-				continue
-			}
-
-			switch action {
-			case "connection":
-				go setupSSH(sbf, data, conn)
-			default:
-				log.Println("not supported action : ", action)
-			}
-		} else {
-			if sbf.Stdin == nil {
-				log.Println(">> Stdin is nil : ", msg)
-				continue
-			}
-			if _, err := sbf.Stdin.Write(msg); err != nil {
-				log.Println("Write error:", err)
+		default:
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				log.Println("Read error:", err)
 				return
+			}
+
+			if isJson(msg) {
+				var data map[string]interface{}
+				if err := json.Unmarshal(msg, &data); err != nil {
+					log.Println("json parsing error: ", err)
+					continue
+				}
+
+				action, ok := data["action"].(string)
+				if !ok {
+					log.Println("action value is not a string : ", action)
+					continue
+				}
+
+				switch action {
+				case "connection":
+					go setupSSH(sbf, data, conn)
+				default:
+					log.Println("not supported action : ", action)
+				}
+			} else {
+				if sbf.Stdin == nil {
+					log.Println(">> Stdin is nil : ", msg)
+					continue
+				}
+				if _, err := sbf.Stdin.Write(msg); err != nil {
+					log.Println("Write error:", err)
+					return
+				}
 			}
 		}
 

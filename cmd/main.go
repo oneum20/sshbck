@@ -8,6 +8,6 @@ import (
 
 func main() {
 	http.HandleFunc("/ws", websocket.HandleWebSocket)
-	fmt.Println("WebSocket server started on :8080")
+	fmt.Println("ssh bridge server started on :8080")
 	http.ListenAndServe(":8080", nil)
 }
