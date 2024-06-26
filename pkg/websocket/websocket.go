@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"sshbck/pkg/queue"
-	"sshbck/pkg/sshwrp"
+	"sshbck/pkg/sshclient"
 
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/ssh"
@@ -19,7 +19,7 @@ func isJson(s []byte) bool {
 }
 
 // setup ssh connection
-func setupSSH(sbf *sshwrp.SSHBuf, scf map[string]interface{}, ws *websocket.Conn) {
+func setupSSH(sbf *sshclient.SSHContext, scf map[string]interface{}, ws *websocket.Conn) *ssh.Session {
 	log.Println("connection info : ", scf)
 	addr := scf["host"].(string) + ":" + scf["port"].(string)
 	cols := int(scf["cols"].(float64))
@@ -32,7 +32,7 @@ func setupSSH(sbf *sshwrp.SSHBuf, scf map[string]interface{}, ws *websocket.Conn
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
-	config := sshwrp.Config{
+	config := sshclient.Config{
 		ServerConfig: serverConfig,
 		Protocol:     "tcp",
 		Addr:         addr,
@@ -42,7 +42,7 @@ func setupSSH(sbf *sshwrp.SSHBuf, scf map[string]interface{}, ws *websocket.Conn
 	if err != nil {
 		log.Println(err)
 		ws.WriteMessage(websocket.TextMessage, []byte(">> "+err.Error()+"\n\r"))
-		return
+		return nil
 	}
 	defer conn.Close()
 
@@ -50,12 +50,14 @@ func setupSSH(sbf *sshwrp.SSHBuf, scf map[string]interface{}, ws *websocket.Conn
 	if err != nil {
 		log.Println(err)
 		ws.WriteMessage(websocket.TextMessage, []byte(">> "+err.Error()+"\n\r"))
-		return
+		return nil
 	}
 	defer session.Close()
 
 	session.RequestPty("xterm", rows, cols, ssh.TerminalModes{})
 
+	sbf.Client = conn
+	sbf.Session = session
 	sbf.Stdin, _ = session.StdinPipe()
 	sbf.Stdout, _ = session.StdoutPipe()
 
@@ -63,6 +65,15 @@ func setupSSH(sbf *sshwrp.SSHBuf, scf map[string]interface{}, ws *websocket.Conn
 
 	session.Shell()
 	session.Wait()
+
+	return session
+}
+
+func newSshPty(session *ssh.Session, scf map[string]interface{}) {
+	cols := int(scf["cols"].(float64))
+	rows := int(scf["rows"].(float64))
+
+	session.RequestPty("xterm", rows, cols, ssh.TerminalModes{})
 }
 
 var upgrader = websocket.Upgrader{
@@ -83,7 +94,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	log.Println("WebSocket connection established.")
 	conn.WriteMessage(websocket.TextMessage, []byte(">> Websocket connection established.\n\r"))
 
-	sbf := &sshwrp.SSHBuf{Q: queue.NewQueue()}
+	sbf := &sshclient.SSHContext{Q: queue.NewQueue()}
 
 	done := make(chan struct{})
 	go func() {
@@ -129,6 +140,8 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				switch action {
 				case "connection":
 					go setupSSH(sbf, data, conn)
+				case "resize":
+					newSshPty(sbf.Session, data)
 				default:
 					log.Println("not supported action : ", action)
 				}

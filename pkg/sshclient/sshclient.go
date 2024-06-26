@@ -1,4 +1,4 @@
-package sshwrp
+package sshclient
 
 import (
 	"io"
@@ -9,10 +9,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-type SSHBuf struct {
+type SSHContext struct {
 	Stdin  io.WriteCloser
 	Stdout io.Reader
 	Q      *queue.Queue
+
+	Client  *ssh.Client
+	Session *ssh.Session
 }
 
 type Config struct {
@@ -39,7 +42,7 @@ func (c Config) NewSession(conn *ssh.Client) (*ssh.Session, error) {
 	return session, nil
 }
 
-func (s SSHBuf) Read() {
+func (s SSHContext) Read() {
 	buf := make([]byte, 1024)
 	for {
 		n, err := s.Stdout.Read(buf)
