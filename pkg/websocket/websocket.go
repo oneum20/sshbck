@@ -93,7 +93,8 @@ func ptyResize(session *ssh.Session, data map[string]interface{}) {
 	cols := int(data["cols"].(float64))
 	rows := int(data["rows"].(float64))
 
-	session.RequestPty("xterm", rows, cols, ssh.TerminalModes{})
+	// session.RequestPty("xterm", rows, cols, ssh.TerminalModes{})
+	session.WindowChange(rows, cols)
 }
 
 func runCmd(sbf *sshclient.SSHContext, data map[string]interface{}) (string, error) {
