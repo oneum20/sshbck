@@ -1,6 +1,7 @@
 package sshclient
 
 import (
+	"bytes"
 	"io"
 	"log"
 
@@ -58,4 +59,21 @@ func (s SSHContext) Read() {
 		// 버퍼 비우기
 		buf = make([]byte, 1024)
 	}
+}
+
+func (s SSHContext) ExecuteCommand(cmd string) (string, error) {
+	var stdoutBuf bytes.Buffer
+
+	session, err := s.Client.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer session.Close()
+
+	session.Stdout = &stdoutBuf
+	if err := session.Run(cmd); err != nil {
+		return "", err
+	}
+
+	return stdoutBuf.String(), nil
 }

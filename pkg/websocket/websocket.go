@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -13,13 +14,34 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// Action
+const (
+	ActionConnect  = "connection"
+	ActionResize   = "resize"
+	ActionTerminal = "terminal"
+)
+
 func isJson(s []byte) bool {
 	var js map[string]interface{}
 	return json.Unmarshal([]byte(s), &js) == nil
 }
 
+func handleMessage(action string, data []byte) []byte {
+	message, err := json.Marshal(map[string]interface{}{
+		"action": action,
+		"data":   base64.StdEncoding.EncodeToString(data),
+	})
+
+	if err != nil {
+		log.Println("json marshal error: ", err)
+		return nil
+	} else {
+		return message
+	}
+}
+
 // setup ssh connection
-func setupSSH(sbf *sshclient.SSHContext, scf map[string]interface{}, ws *websocket.Conn) *ssh.Session {
+func setupSSH(sbf *sshclient.SSHContext, scf map[string]interface{}, ws *websocket.Conn) {
 	log.Println("connection info : ", scf)
 	addr := scf["host"].(string) + ":" + scf["port"].(string)
 	cols := int(scf["cols"].(float64))
@@ -41,16 +63,16 @@ func setupSSH(sbf *sshclient.SSHContext, scf map[string]interface{}, ws *websock
 	conn, err := config.NewConn()
 	if err != nil {
 		log.Println(err)
-		ws.WriteMessage(websocket.TextMessage, []byte(">> "+err.Error()+"\n\r"))
-		return nil
+		ws.WriteMessage(websocket.TextMessage, handleMessage(ActionTerminal, []byte("ERROR : "+err.Error()+"\n\r")))
+		return
 	}
 	defer conn.Close()
 
 	session, err := config.NewSession(conn)
 	if err != nil {
 		log.Println(err)
-		ws.WriteMessage(websocket.TextMessage, []byte(">> "+err.Error()+"\n\r"))
-		return nil
+		ws.WriteMessage(websocket.TextMessage, handleMessage(ActionTerminal, []byte("ERROR : "+err.Error()+"\n\r")))
+		return
 	}
 	defer session.Close()
 
@@ -65,15 +87,19 @@ func setupSSH(sbf *sshclient.SSHContext, scf map[string]interface{}, ws *websock
 
 	session.Shell()
 	session.Wait()
-
-	return session
 }
 
-func newSshPty(session *ssh.Session, scf map[string]interface{}) {
-	cols := int(scf["cols"].(float64))
-	rows := int(scf["rows"].(float64))
+func ptyResize(session *ssh.Session, data map[string]interface{}) {
+	cols := int(data["cols"].(float64))
+	rows := int(data["rows"].(float64))
 
 	session.RequestPty("xterm", rows, cols, ssh.TerminalModes{})
+}
+
+func runCmd(sbf *sshclient.SSHContext, data map[string]interface{}) (string, error) {
+	command := string(data["cmd"].(string))
+
+	return sbf.ExecuteCommand(command)
 }
 
 var upgrader = websocket.Upgrader{
@@ -91,31 +117,13 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	log.Println("WebSocket connection established.")
-	conn.WriteMessage(websocket.TextMessage, []byte(">> Websocket connection established.\n\r"))
-
 	sbf := &sshclient.SSHContext{Q: queue.NewQueue()}
 
 	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			if sbf.Q.Len() > 0 {
-				err := conn.WriteMessage(websocket.TextMessage, sbf.Q.Pop().([]byte))
-				if err != nil {
-					log.Println("websocket write error : ", err)
-					return
-				}
-			} else {
-				time.Sleep(100 * time.Millisecond) // 루프 내에서 대기 추가
-			}
-		}
-
-	}()
-
 	for {
 		select {
 		case <-done:
+			log.Println("Websocket connection close")
 			return
 		default:
 			_, msg, err := conn.ReadMessage()
@@ -138,21 +146,42 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 
 				switch action {
-				case "connection":
+				case ActionConnect:
+					go func() {
+						defer close(done)
+
+						for {
+							if sbf.Q.Len() > 0 {
+								data := handleMessage(ActionTerminal, sbf.Q.Pop().([]byte))
+								err := conn.WriteMessage(websocket.TextMessage, data)
+								if err != nil {
+									log.Println("websocket write error : ", err)
+									return
+								}
+							} else {
+								// log.Println("any goroutin")
+								time.Sleep(100 * time.Millisecond) // 루프 내에서 대기 추가
+							}
+						}
+
+					}()
+
 					go setupSSH(sbf, data, conn)
-				case "resize":
-					newSshPty(sbf.Session, data)
+				case ActionResize:
+					ptyResize(sbf.Session, data)
+				case ActionTerminal:
+					terminalMessage := data["data"].(string)
+
+					if sbf.Stdin == nil {
+						log.Println(">> Stdin is nil : ", msg)
+						continue
+					}
+					if _, err := sbf.Stdin.Write([]byte(terminalMessage)); err != nil {
+						log.Println("Write error:", err)
+						return
+					}
 				default:
 					log.Println("not supported action : ", action)
-				}
-			} else {
-				if sbf.Stdin == nil {
-					log.Println(">> Stdin is nil : ", msg)
-					continue
-				}
-				if _, err := sbf.Stdin.Write(msg); err != nil {
-					log.Println("Write error:", err)
-					return
 				}
 			}
 		}
