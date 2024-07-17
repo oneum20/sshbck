@@ -19,6 +19,7 @@ const (
 	ActionConnect  = "connection"
 	ActionResize   = "resize"
 	ActionTerminal = "terminal"
+	ActionGetFiles = "getfiles"
 )
 
 func isJson(s []byte) bool {
@@ -97,6 +98,19 @@ func ptyResize(session *ssh.Session, data map[string]interface{}) {
 	session.WindowChange(rows, cols)
 }
 
+func getFiles(sbf *sshclient.SSHContext, root string) []byte {
+	fileTree, err := sbf.GetFiles(root)
+	if err != nil {
+		log.Println("error: ", err)
+	}
+	data := map[string]interface{}{
+		"parent":   root,
+		"fileTree": fileTree,
+	}
+	dataJson, _ := json.MarshalIndent(data, "", "  ")
+	return handleMessage(ActionGetFiles, dataJson)
+}
+
 func runCmd(sbf *sshclient.SSHContext, data map[string]interface{}) (string, error) {
 	command := string(data["cmd"].(string))
 
@@ -160,7 +174,6 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 									return
 								}
 							} else {
-								// log.Println("any goroutin")
 								time.Sleep(100 * time.Millisecond) // 루프 내에서 대기 추가
 							}
 						}
@@ -179,6 +192,18 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 					}
 					if _, err := sbf.Stdin.Write([]byte(terminalMessage)); err != nil {
 						log.Println("Write error:", err)
+						return
+					}
+				case ActionGetFiles:
+					home := data["root"].(string)
+					if home == "HOME_DIR" {
+						home, _ = sbf.HomeDir()
+					}
+					message := getFiles(sbf, home)
+
+					err := conn.WriteMessage(websocket.TextMessage, message)
+					if err != nil {
+						log.Println("websocket write error : ", err)
 						return
 					}
 				default:

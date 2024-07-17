@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"log"
+	"strings"
 
 	"sshbck/pkg/queue"
 
@@ -23,6 +24,12 @@ type Config struct {
 	ServerConfig *ssh.ClientConfig
 	Protocol     string
 	Addr         string
+}
+
+type FileInfo struct {
+	Name  string     `json:"name"`
+	IsDir bool       `json:"isDir"`
+	Files []FileInfo `json:"files,omitempty"`
 }
 
 func (c Config) NewConn() (*ssh.Client, error) {
@@ -76,4 +83,43 @@ func (s SSHContext) ExecuteCommand(cmd string) (string, error) {
 	}
 
 	return stdoutBuf.String(), nil
+}
+
+func (s SSHContext) HomeDir() (string, error) {
+	r, err := s.ExecuteCommand("pwd")
+	if err != nil {
+		return "", err
+	}
+
+	return strings.ReplaceAll(r, "\n", ""), nil
+}
+
+func (s SSHContext) GetFiles(root string) ([]FileInfo, error) {
+	var fileTree []FileInfo
+
+	r, err := s.ExecuteCommand("ls -Al " + root)
+	if err != nil {
+		return nil, err
+	}
+
+	lines := strings.Split(r, "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+
+		if len(fields) < 9 {
+			continue
+		}
+
+		isDir := fields[0][0] == 'd'
+		name := fields[8]
+
+		fileInfo := FileInfo{
+			Name:  name,
+			IsDir: isDir,
+		}
+
+		fileTree = append(fileTree, fileInfo)
+	}
+
+	return fileTree, nil
 }
