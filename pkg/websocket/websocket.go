@@ -16,10 +16,11 @@ import (
 
 // Action
 const (
-	ActionConnect  = "connection"
-	ActionResize   = "resize"
-	ActionTerminal = "terminal"
-	ActionGetFiles = "getfiles"
+	ActionConnect   = "connection"
+	ActionResize    = "resize"
+	ActionTerminal  = "terminal"
+	ActionGetFiles  = "getfiles"
+	ActionGetGroups = "getgroups"
 )
 
 func isJson(s []byte) bool {
@@ -111,6 +112,20 @@ func getFiles(sbf *sshclient.SSHContext, root string) []byte {
 	return handleMessage(ActionGetFiles, dataJson)
 }
 
+func getGroups(sbf *sshclient.SSHContext) []byte {
+	groups, err := sbf.GetGroups()
+	if err != nil {
+		log.Println("error: ", err)
+	}
+
+	data := map[string]interface{}{
+		"groups": groups,
+	}
+
+	dataJson, _ := json.MarshalIndent(data, "", "  ")
+	return handleMessage(ActionGetGroups, dataJson)
+}
+
 func runCmd(sbf *sshclient.SSHContext, data map[string]interface{}) (string, error) {
 	command := string(data["cmd"].(string))
 
@@ -200,6 +215,14 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 						home, _ = sbf.HomeDir()
 					}
 					message := getFiles(sbf, home)
+
+					err := conn.WriteMessage(websocket.TextMessage, message)
+					if err != nil {
+						log.Println("websocket write error : ", err)
+						return
+					}
+				case ActionGetGroups:
+					message := getGroups(sbf)
 
 					err := conn.WriteMessage(websocket.TextMessage, message)
 					if err != nil {

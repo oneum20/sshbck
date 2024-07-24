@@ -27,9 +27,11 @@ type Config struct {
 }
 
 type FileInfo struct {
-	Name  string     `json:"name"`
-	IsDir bool       `json:"isDir"`
-	Files []FileInfo `json:"files,omitempty"`
+	Name  string `json:"name"`
+	IsDir bool   `json:"isDir"`
+	Owner string `json:"owner"`
+	Group string `json:"group"`
+	Perm  string `json:"perm"`
 }
 
 func (c Config) NewConn() (*ssh.Client, error) {
@@ -116,10 +118,24 @@ func (s SSHContext) GetFiles(root string) ([]FileInfo, error) {
 		fileInfo := FileInfo{
 			Name:  name,
 			IsDir: isDir,
+			Owner: fields[2],
+			Group: fields[3],
+			Perm:  fields[0],
 		}
 
 		fileTree = append(fileTree, fileInfo)
 	}
 
 	return fileTree, nil
+}
+
+func (s SSHContext) GetGroups() ([]string, error) {
+	r, err := s.ExecuteCommand("groups")
+	if err != nil {
+		return nil, err
+	}
+
+	groups := strings.Split(r, " ")
+
+	return groups, nil
 }
