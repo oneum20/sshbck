@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"path"
 	"time"
 
-	"sshbck/pkg/queue"
 	"sshbck/pkg/sshclient"
 
 	"github.com/gorilla/websocket"
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -43,7 +44,7 @@ func handleMessage(action string, data []byte) []byte {
 }
 
 // setup ssh connection
-func setupSSH(sbf *sshclient.SSHContext, scf map[string]interface{}, ws *websocket.Conn) {
+func setupSSHSFTP(sbf *sshclient.SSHContext, scf map[string]interface{}, ws *websocket.Conn) {
 	log.Println("connection info : ", scf)
 	addr := scf["host"].(string) + ":" + scf["port"].(string)
 	cols := int(scf["cols"].(float64))
@@ -56,13 +57,13 @@ func setupSSH(sbf *sshclient.SSHContext, scf map[string]interface{}, ws *websock
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
-	config := sshclient.Config{
+	sshConfig := sshclient.Config{
 		ServerConfig: serverConfig,
 		Protocol:     "tcp",
 		Addr:         addr,
 	}
 
-	conn, err := config.NewConn()
+	conn, err := sshConfig.NewConn()
 	if err != nil {
 		log.Println(err)
 		ws.WriteMessage(websocket.TextMessage, handleMessage(ActionTerminal, []byte("ERROR : "+err.Error()+"\n\r")))
@@ -70,7 +71,7 @@ func setupSSH(sbf *sshclient.SSHContext, scf map[string]interface{}, ws *websock
 	}
 	defer conn.Close()
 
-	session, err := config.NewSession(conn)
+	session, err := sshConfig.NewSession(conn)
 	if err != nil {
 		log.Println(err)
 		ws.WriteMessage(websocket.TextMessage, handleMessage(ActionTerminal, []byte("ERROR : "+err.Error()+"\n\r")))
@@ -84,6 +85,15 @@ func setupSSH(sbf *sshclient.SSHContext, scf map[string]interface{}, ws *websock
 	sbf.Session = session
 	sbf.Stdin, _ = session.StdinPipe()
 	sbf.Stdout, _ = session.StdoutPipe()
+
+	// SFTP 클라이언트
+	sbf.SFTP, err = sftp.NewClient(conn)
+	if err != nil {
+		log.Println(err)
+		ws.WriteMessage(websocket.TextMessage, handleMessage(ActionTerminal, []byte("ERROR : "+err.Error()+"\n\r")))
+		return
+	}
+	defer sbf.SFTP.Close()
 
 	go sbf.Read()
 
@@ -100,12 +110,14 @@ func ptyResize(session *ssh.Session, data map[string]interface{}) {
 }
 
 func getFiles(sbf *sshclient.SSHContext, root string) []byte {
+	absPath := path.Clean(root)
 	fileTree, err := sbf.GetFiles(root)
 	if err != nil {
 		log.Println("error: ", err)
 	}
+
 	data := map[string]interface{}{
-		"parent":   root,
+		"parent":   absPath,
 		"fileTree": fileTree,
 	}
 	dataJson, _ := json.MarshalIndent(data, "", "  ")
@@ -147,7 +159,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	sbf := &sshclient.SSHContext{Q: queue.NewQueue()}
+	sbf := sshclient.NewSSHContext()
 
 	done := make(chan struct{})
 	for {
@@ -195,7 +207,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 					}()
 
-					go setupSSH(sbf, data, conn)
+					go setupSSHSFTP(sbf, data, conn)
 				case ActionResize:
 					ptyResize(sbf.Session, data)
 				case ActionTerminal:
