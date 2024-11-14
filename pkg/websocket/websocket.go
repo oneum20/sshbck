@@ -1,8 +1,11 @@
 package websocket
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"path"
@@ -15,133 +18,153 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Action
+// WebSocket 액션 상수 정의
 const (
-	ActionConnect   = "connection"
-	ActionResize    = "resize"
-	ActionTerminal  = "terminal"
-	ActionGetFiles  = "getfiles"
-	ActionGetGroups = "getgroups"
+	ActionConnect         = "connection"
+	ActionResize          = "resize"
+	ActionTerminal        = "terminal"
+	ActionGetFileList     = "getfilelist"
+	ActionGetFileContents = "getfilecontents"
+	ActionGetGroups       = "getgroups"
 )
 
-func isJson(s []byte) bool {
-	var js map[string]interface{}
-	return json.Unmarshal([]byte(s), &js) == nil
+// Json 변환
+func toJSON(data map[string]interface{}) []byte {
+	jsonData, _ := json.Marshal(data)
+	return jsonData
 }
 
-func handleMessage(action string, data []byte) []byte {
+// Json 유효성 검사
+func isJSON(data []byte) bool {
+	var js map[string]interface{}
+	return json.Unmarshal(data, &js) == nil
+}
+
+// WebSocket 메시지 생성 함수
+func createMessage(action string, data []byte) []byte {
 	message, err := json.Marshal(map[string]interface{}{
 		"action": action,
 		"data":   base64.StdEncoding.EncodeToString(data),
 	})
-
 	if err != nil {
-		log.Println("json marshal error: ", err)
+		log.Println("JSON marshal error:", err)
 		return nil
-	} else {
-		return message
 	}
+	return message
 }
 
-// setup ssh connection
-func setupSSHSFTP(sbf *sshclient.SSHContext, scf map[string]interface{}, ws *websocket.Conn) {
-	log.Println("connection info : ", scf)
-	addr := scf["host"].(string) + ":" + scf["port"].(string)
-	cols := int(scf["cols"].(float64))
-	rows := int(scf["rows"].(float64))
+// SSH 및 SFTP 연결 설정
+func setupSSHSFTP(ctx *sshclient.SSHContext, config map[string]interface{}, wsConn *websocket.Conn) {
+	addr := config["host"].(string) + ":" + config["port"].(string)
+	cols := int(config["cols"].(float64))
+	rows := int(config["rows"].(float64))
 
 	serverConfig := &ssh.ClientConfig{
-		User: scf["username"].(string),
+		User: config["username"].(string),
 		Auth: []ssh.AuthMethod{
-			ssh.Password(scf["password"].(string)),
+			ssh.Password(config["password"].(string)),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 	sshConfig := sshclient.Config{
 		ServerConfig: serverConfig,
 		Protocol:     "tcp",
-		Addr:         addr,
+		Address:      addr,
 	}
 
 	conn, err := sshConfig.NewConn()
 	if err != nil {
-		log.Println(err)
-		ws.WriteMessage(websocket.TextMessage, handleMessage(ActionTerminal, []byte("ERROR : "+err.Error()+"\n\r")))
+		sendError(wsConn, fmt.Sprintf("SSH connection error: %v", err))
 		return
 	}
 	defer conn.Close()
 
 	session, err := sshConfig.NewSession(conn)
 	if err != nil {
-		log.Println(err)
-		ws.WriteMessage(websocket.TextMessage, handleMessage(ActionTerminal, []byte("ERROR : "+err.Error()+"\n\r")))
+		sendError(wsConn, fmt.Sprintf("SSH session error: %v", err))
 		return
 	}
 	defer session.Close()
 
 	session.RequestPty("xterm", rows, cols, ssh.TerminalModes{})
 
-	sbf.Client = conn
-	sbf.Session = session
-	sbf.Stdin, _ = session.StdinPipe()
-	sbf.Stdout, _ = session.StdoutPipe()
+	ctx.Client = conn
+	ctx.Session = session
+	ctx.Stdin, _ = session.StdinPipe()
+	ctx.Stdout, _ = session.StdoutPipe()
 
-	// SFTP 클라이언트
-	sbf.SFTP, err = sftp.NewClient(conn)
+	// Set up SFTP client
+	ctx.SFTPClient, err = sftp.NewClient(conn)
 	if err != nil {
-		log.Println(err)
-		ws.WriteMessage(websocket.TextMessage, handleMessage(ActionTerminal, []byte("ERROR : "+err.Error()+"\n\r")))
+		log.Println("SFTP client setup error:", err)
+		wsConn.WriteMessage(websocket.TextMessage, createMessage(ActionTerminal, []byte("ERROR: "+err.Error()+"\n\r")))
 		return
 	}
-	defer sbf.SFTP.Close()
+	defer ctx.SFTPClient.Close()
 
-	go sbf.Read()
-
+	go ctx.Read()
 	session.Shell()
 	session.Wait()
 }
 
-func ptyResize(session *ssh.Session, data map[string]interface{}) {
+// terminal pty 리사이즈
+func resizePTY(session *ssh.Session, data map[string]interface{}) {
 	cols := int(data["cols"].(float64))
 	rows := int(data["rows"].(float64))
-
-	// session.RequestPty("xterm", rows, cols, ssh.TerminalModes{})
 	session.WindowChange(rows, cols)
 }
 
-func getFiles(sbf *sshclient.SSHContext, root string) []byte {
-	absPath := path.Clean(root)
-	fileTree, err := sbf.GetFiles(root)
-	if err != nil {
-		log.Println("error: ", err)
-	}
-
-	data := map[string]interface{}{
-		"parent":   absPath,
-		"fileTree": fileTree,
-	}
-	dataJson, _ := json.MarshalIndent(data, "", "  ")
-	return handleMessage(ActionGetFiles, dataJson)
+// Generates a unique hash for a file path
+func generateUniqueHash(filePath string) string {
+	hash := sha256.Sum256([]byte(filePath + time.Now().String()))
+	return fmt.Sprintf("%x", hash)
 }
 
-func getGroups(sbf *sshclient.SSHContext) []byte {
-	groups, err := sbf.GetGroups()
+// 파일 콘텐츠를 청크 단위로 읽어 전송
+func streamFileContent(ctx *sshclient.SSHContext, path string, ws *websocket.Conn) {
+	fileHash := generateUniqueHash(path)
+	file, err := ctx.SFTPClient.Open(path)
 	if err != nil {
-		log.Println("error: ", err)
+		log.Println("File read error:", err)
+		return
 	}
+	defer file.Close()
 
-	data := map[string]interface{}{
-		"groups": groups,
+	buf := make([]byte, 4096)
+	for {
+		n, err := file.Read(buf)
+		if n > 0 {
+			chunkData := map[string]interface{}{
+				"fileHash": fileHash,
+				"status":   "in-progress",
+				"content":  base64.StdEncoding.EncodeToString(buf[:n]),
+			}
+			msg := createMessage(ActionGetFileContents, toJSON(chunkData))
+			if err := ws.WriteMessage(websocket.TextMessage, msg); err != nil {
+				log.Println("WebSocket write error:", err)
+				return
+			}
+		}
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			log.Println("File read error:", err)
+			return
+		}
 	}
-
-	dataJson, _ := json.MarshalIndent(data, "", "  ")
-	return handleMessage(ActionGetGroups, dataJson)
+	finalChunk := map[string]interface{}{
+		"fileHash": fileHash,
+		"status":   "complete",
+		"content":  nil,
+	}
+	ws.WriteMessage(websocket.TextMessage, createMessage(ActionGetFileContents, toJSON(finalChunk)))
 }
 
-func runCmd(sbf *sshclient.SSHContext, data map[string]interface{}) (string, error) {
-	command := string(data["cmd"].(string))
-
-	return sbf.ExecuteCommand(command)
+// WebSocket을 통해 오류 메시지 전송
+func sendError(ws *websocket.Conn, errorMsg string) {
+	log.Println(errorMsg)
+	message := createMessage(ActionTerminal, []byte("ERROR: "+errorMsg+"\n"))
+	ws.WriteMessage(websocket.TextMessage, message)
 }
 
 var upgrader = websocket.Upgrader{
@@ -150,7 +173,7 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-// websocket handler
+// WebSocket handler
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -159,13 +182,13 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	sbf := sshclient.NewSSHContext()
-
+	ctx := sshclient.NewSSHContext()
 	done := make(chan struct{})
+
 	for {
 		select {
 		case <-done:
-			log.Println("Websocket connection close")
+			log.Println("WebSocket connection closed")
 			return
 		default:
 			_, msg, err := conn.ReadMessage()
@@ -174,79 +197,72 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			if isJson(msg) {
-				var data map[string]interface{}
-				if err := json.Unmarshal(msg, &data); err != nil {
-					log.Println("json parsing error: ", err)
+			if isJSON(msg) {
+				var requestData map[string]interface{}
+				if err := json.Unmarshal(msg, &requestData); err != nil {
+					log.Println("JSON parsing error:", err)
 					continue
 				}
 
-				action, ok := data["action"].(string)
-				if !ok {
-					log.Println("action value is not a string : ", action)
-					continue
-				}
-
+				action := requestData["action"].(string)
 				switch action {
 				case ActionConnect:
+					go setupSSHSFTP(ctx, requestData, conn)
 					go func() {
 						defer close(done)
-
 						for {
-							if sbf.Q.Len() > 0 {
-								data := handleMessage(ActionTerminal, sbf.Q.Pop().([]byte))
-								err := conn.WriteMessage(websocket.TextMessage, data)
-								if err != nil {
-									log.Println("websocket write error : ", err)
+							if ctx.Queue.Len() > 0 {
+								data := createMessage(ActionTerminal, ctx.Queue.Pop().([]byte))
+								if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+									log.Println("WebSocket write error:", err)
 									return
 								}
 							} else {
-								time.Sleep(100 * time.Millisecond) // 루프 내에서 대기 추가
+								time.Sleep(100 * time.Millisecond)
 							}
 						}
-
 					}()
-
-					go setupSSHSFTP(sbf, data, conn)
-				case ActionResize:
-					ptyResize(sbf.Session, data)
 				case ActionTerminal:
-					terminalMessage := data["data"].(string)
-
-					if sbf.Stdin == nil {
-						log.Println(">> Stdin is nil : ", msg)
+					termMsg := requestData["data"].(string)
+					if ctx.Stdin == nil {
+						log.Println("Stdin is nil")
 						continue
 					}
-					if _, err := sbf.Stdin.Write([]byte(terminalMessage)); err != nil {
+					if _, err := ctx.Stdin.Write([]byte(termMsg)); err != nil {
 						log.Println("Write error:", err)
 						return
 					}
-				case ActionGetFiles:
-					home := data["root"].(string)
-					if home == "HOME_DIR" {
-						home, _ = sbf.HomeDir()
+				case ActionResize:
+					resizePTY(ctx.Session, requestData)
+				case ActionGetFileContents:
+					go streamFileContent(ctx, requestData["path"].(string), conn)
+				case ActionGetFileList:
+					root := requestData["root"].(string)
+					if root == "HOME_DIR" {
+						root, _ = ctx.HomeDir()
 					}
-					message := getFiles(sbf, home)
-
-					err := conn.WriteMessage(websocket.TextMessage, message)
+					files, err := ctx.GetFileList(root)
 					if err != nil {
-						log.Println("websocket write error : ", err)
-						return
+						log.Println("File list error:", err)
+						continue
 					}
+					data := map[string]interface{}{
+						"parent":   path.Clean(root),
+						"fileTree": files,
+					}
+					conn.WriteMessage(websocket.TextMessage, createMessage(ActionGetFileList, toJSON(data)))
 				case ActionGetGroups:
-					message := getGroups(sbf)
-
-					err := conn.WriteMessage(websocket.TextMessage, message)
+					groups, err := ctx.GetGroups()
 					if err != nil {
-						log.Println("websocket write error : ", err)
-						return
+						log.Println("Group retrieval error:", err)
+						continue
 					}
+
+					conn.WriteMessage(websocket.TextMessage, createMessage(ActionGetGroups, toJSON(map[string]interface{}{"groups": groups})))
 				default:
-					log.Println("not supported action : ", action)
+					log.Println("Unsupported action:", action)
 				}
 			}
 		}
-
 	}
-
 }

@@ -17,21 +17,21 @@ import (
 type SSHContext struct {
 	Stdin  io.WriteCloser
 	Stdout io.Reader
-	Q      *queue.Queue
+	Queue  *queue.Queue
 
-	Client  *ssh.Client
-	Session *ssh.Session
-	SFTP    *sftp.Client
+	Client     *ssh.Client
+	Session    *ssh.Session
+	SFTPClient *sftp.Client
 
-	userCache  map[uint32]string // UID -> Username 캐시
-	groupCache map[uint32]string // GID -> Groupname 캐시
-	cacheMutex sync.Mutex        // 캐시 접근 동시성을 위한 Mutex
+	userCache  map[uint32]string // UID -> Username cache
+	groupCache map[uint32]string // GID -> Groupname cache
+	cacheMutex sync.Mutex        // Mutex for cache concurrency
 }
 
 type Config struct {
 	ServerConfig *ssh.ClientConfig
 	Protocol     string
-	Addr         string
+	Address      string
 }
 
 type FileInfo struct {
@@ -43,88 +43,54 @@ type FileInfo struct {
 	Size  int64  `json:"size"`
 }
 
+// SSH context 생성
 func NewSSHContext() *SSHContext {
 	return &SSHContext{
-		Q:          queue.NewQueue(),
+		Queue:      queue.NewQueue(),
 		userCache:  make(map[uint32]string),
 		groupCache: make(map[uint32]string),
 	}
 }
 
-func (c Config) NewConn() (*ssh.Client, error) {
-	conn, err := ssh.Dial(c.Protocol, c.Addr, c.ServerConfig)
+// SSH 연결 생성 함수
+func (cfg Config) NewConn() (*ssh.Client, error) {
+	conn, err := ssh.Dial(cfg.Protocol, cfg.Address, cfg.ServerConfig)
 	if err != nil {
 		return nil, err
 	}
-
 	return conn, nil
 }
 
-func (c Config) NewSession(conn *ssh.Client) (*ssh.Session, error) {
+// SSH 세션 생성 함수
+func (cfg Config) NewSession(conn *ssh.Client) (*ssh.Session, error) {
 	session, err := conn.NewSession()
 	if err != nil {
 		return nil, err
 	}
-
 	return session, nil
 }
 
-// UID와 GID를 사용자와 그룹 이름으로 변환하고 캐시에 저장
-func (c *SSHContext) getOwnerGroupName(uid uint32, gid uint32) (string, string) {
-	c.cacheMutex.Lock()
-	defer c.cacheMutex.Unlock()
-
-	// UID가 캐시에 있는지 확인
-	ownerName, found := c.userCache[uid]
-	if !found {
-		ownerCmd := fmt.Sprintf("getent passwd %d | cut -d: -f1", uid)
-		ownerName, err := c.ExecuteCommand(ownerCmd)
-		if err != nil {
-			log.Printf("Failed to get owner name for UID %d: %v", uid, err)
-			ownerName = fmt.Sprintf("%d", uid)
-		}
-		ownerName = strings.TrimSpace(ownerName)
-		c.userCache[uid] = ownerName // 캐시에 저장
-	}
-
-	// GID가 캐시에 있는지 확인
-	groupName, found := c.groupCache[gid]
-	if !found {
-		groupCmd := fmt.Sprintf("getent group %d | cut -d: -f1", gid)
-		groupName, err := c.ExecuteCommand(groupCmd)
-		if err != nil {
-			log.Printf("Failed to get group name for GID %d: %v", gid, err)
-			groupName = fmt.Sprintf("%d", gid)
-		}
-		groupName = strings.TrimSpace(groupName)
-		c.groupCache[gid] = groupName // 캐시에 저장
-	}
-
-	return ownerName, groupName
-}
-
-func (c *SSHContext) Read() {
+// Stdout를 지속적으로 읽고 출력 내용을 Queue에 추가
+func (ctx *SSHContext) Read() {
 	buf := make([]byte, 1024)
 	for {
-		n, err := c.Stdout.Read(buf)
+		n, err := ctx.Stdout.Read(buf)
 		if err != nil && err != io.EOF {
-			log.Println("io read error: ", err)
+			log.Println("I/O read error:", err)
+			return
 		}
-		if n == 0 {
-			continue
+		if n > 0 {
+			ctx.Queue.Push(buf[:n])
+			buf = make([]byte, 1024) // Clear buffer
 		}
-
-		c.Q.Push(buf[:n])
-
-		// 버퍼 비우기
-		buf = make([]byte, 1024)
 	}
 }
 
-func (c *SSHContext) ExecuteCommand(cmd string) (string, error) {
+// SSH 명령 실행
+func (ctx *SSHContext) ExecuteCommand(cmd string) (string, error) {
 	var stdoutBuf bytes.Buffer
 
-	session, err := c.Client.NewSession()
+	session, err := ctx.Client.NewSession()
 	if err != nil {
 		return "", err
 	}
@@ -134,30 +100,72 @@ func (c *SSHContext) ExecuteCommand(cmd string) (string, error) {
 	if err := session.Run(cmd); err != nil {
 		return "", err
 	}
-
 	return stdoutBuf.String(), nil
 }
 
-func (c *SSHContext) HomeDir() (string, error) {
-	r, err := c.ExecuteCommand("pwd")
+// UID와 GID를 사용자와 그룹 이름으로 변환하여 캐시에 저장
+func (ctx *SSHContext) getOwnerGroupName(uid, gid uint32) (string, string) {
+	ctx.cacheMutex.Lock()
+	defer ctx.cacheMutex.Unlock()
+
+	// UID가 캐시에 있는지 확인
+	ownerName, found := ctx.userCache[uid]
+	if !found {
+		ownerCmd := fmt.Sprintf("getent passwd %d | cut -d: -f1", uid)
+		ownerName, err := ctx.ExecuteCommand(ownerCmd)
+		if err != nil {
+			log.Printf("Failed to get owner name for UID %d: %v", uid, err)
+			ownerName = fmt.Sprintf("%d", uid)
+		}
+		ownerName = strings.TrimSpace(ownerName)
+		ctx.userCache[uid] = ownerName
+	}
+
+	// GID가 캐시에 있는지 확인
+	groupName, found := ctx.groupCache[gid]
+	if !found {
+		groupCmd := fmt.Sprintf("getent group %d | cut -d: -f1", gid)
+		groupName, err := ctx.ExecuteCommand(groupCmd)
+		if err != nil {
+			log.Printf("Failed to get group name for GID %d: %v", gid, err)
+			groupName = fmt.Sprintf("%d", gid)
+		}
+		groupName = strings.TrimSpace(groupName)
+		ctx.groupCache[gid] = groupName
+	}
+
+	return ownerName, groupName
+}
+
+// 홈 디렉토리 반환
+func (ctx *SSHContext) HomeDir() (string, error) {
+	homeDir, err := ctx.ExecuteCommand("pwd")
 	if err != nil {
 		return "", err
 	}
-
-	return strings.ReplaceAll(r, "\n", ""), nil
+	return strings.TrimSpace(homeDir), nil
 }
 
-func (c *SSHContext) GetFiles(root string) ([]FileInfo, error) {
-	var fileTree []FileInfo
+// SFTP를 이용하여 파일 읽기
+func (ctx *SSHContext) GetFile(path string) (*sftp.File, error) {
+	file, err := ctx.SFTPClient.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	return file, nil
+}
 
-	files, err := c.SFTP.ReadDir(root)
+// 특정 경로의 파일 목록을 반환
+func (ctx *SSHContext) GetFileList(root string) ([]FileInfo, error) {
+	var filesList []FileInfo
+	files, err := ctx.SFTPClient.ReadDir(root)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, file := range files {
 		stat := file.Sys().(*sftp.FileStat)
-		ownerName, groupName := c.getOwnerGroupName(stat.UID, stat.GID)
+		ownerName, groupName := ctx.getOwnerGroupName(stat.UID, stat.GID)
 		perm := file.Mode().Perm().String()
 
 		fileInfo := FileInfo{
@@ -168,20 +176,17 @@ func (c *SSHContext) GetFiles(root string) ([]FileInfo, error) {
 			Perm:  perm,
 			Size:  file.Size(),
 		}
-
-		fileTree = append(fileTree, fileInfo)
+		filesList = append(filesList, fileInfo)
 	}
 
-	return fileTree, nil
+	return filesList, nil
 }
 
-func (c *SSHContext) GetGroups() ([]string, error) {
-	r, err := c.ExecuteCommand("groups")
+// 특정 사용자가 속한 그룹 목록 조회
+func (ctx *SSHContext) GetGroups() ([]string, error) {
+	groupsStr, err := ctx.ExecuteCommand("groups")
 	if err != nil {
 		return nil, err
 	}
-
-	groups := strings.Split(r, " ")
-
-	return groups, nil
+	return strings.Split(strings.TrimSpace(groupsStr), " "), nil
 }
