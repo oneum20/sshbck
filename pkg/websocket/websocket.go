@@ -137,6 +137,7 @@ func streamFileContent(ctx *sshclient.SSHContext, path string, ws *websocket.Con
 			chunkData := map[string]interface{}{
 				"fileHash": fileHash,
 				"status":   "in-progress",
+				"path":     path,
 				"content":  base64.StdEncoding.EncodeToString(buf[:n]),
 			}
 			msg := createMessage(ActionGetFileContents, toJSON(chunkData))
@@ -155,6 +156,7 @@ func streamFileContent(ctx *sshclient.SSHContext, path string, ws *websocket.Con
 	finalChunk := map[string]interface{}{
 		"fileHash": fileHash,
 		"status":   "complete",
+		"path":     path,
 		"content":  nil,
 	}
 	ws.WriteMessage(websocket.TextMessage, createMessage(ActionGetFileContents, toJSON(finalChunk)))
