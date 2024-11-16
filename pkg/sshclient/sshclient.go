@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"strings"
 	"sync"
 
@@ -191,24 +192,14 @@ func (ctx *SSHContext) GetGroups() ([]string, error) {
 	return strings.Split(strings.TrimSpace(groupsStr), " "), nil
 }
 
-// 해당 파일에 대한 쓰기 권한 확인 (디렉토리 X)
-func (ctx *SSHContext) CheckWritePermissionWithStat(path string) bool {
-	fileInfo, err := ctx.SFTPClient.Stat(path)
+// 해당 파일에 대한 쓰기 권한 확인
+func (ctx *SSHContext) CheckWritePermission(path string) bool {
+	file, err := ctx.SFTPClient.OpenFile(path, os.O_WRONLY)
 	if err != nil {
-		log.Println("Error getting file info:", err)
+		// 파일을 열 수 없으면 쓰기 권한이 없음
 		return false
 	}
-
-	// 파일의 소유자, 그룹, 기타 사용자 권한 검사
-	mode := fileInfo.Mode()
-	if mode&0200 != 0 { // 소유자 쓰기 권한 확인
-		return true
-	}
-	if mode&0020 != 0 { // 그룹 쓰기 권한 확인
-		return true
-	}
-	if mode&0002 != 0 { // 기타 사용자 쓰기 권한 확인
-		return true
-	}
-	return false
+	defer file.Close()
+	// 파일을 열 수 있으면 쓰기 권한이 있음
+	return true
 }

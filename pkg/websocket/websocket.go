@@ -130,7 +130,7 @@ func streamFileContent(ctx *sshclient.SSHContext, path string, ws *websocket.Con
 	}
 	defer file.Close()
 
-	writable := ctx.CheckWritePermissionWithStat(path)
+	writable := ctx.CheckWritePermission(path)
 
 	buf := make([]byte, 4096)
 	for {
@@ -213,7 +213,6 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				action := requestData["action"].(string)
 				switch action {
 				case ActionConnect:
-					go setupSSHSFTP(ctx, requestData, conn)
 					go func() {
 						defer close(done)
 						for {
@@ -228,6 +227,8 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 							}
 						}
 					}()
+
+					go setupSSHSFTP(ctx, requestData, conn)
 				case ActionTerminal:
 					termMsg := requestData["data"].(string)
 					if ctx.Stdin == nil {
