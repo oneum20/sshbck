@@ -130,6 +130,8 @@ func streamFileContent(ctx *sshclient.SSHContext, path string, ws *websocket.Con
 	}
 	defer file.Close()
 
+	writable := ctx.CheckWritePermissionWithStat(path)
+
 	buf := make([]byte, 4096)
 	for {
 		n, err := file.Read(buf)
@@ -138,6 +140,7 @@ func streamFileContent(ctx *sshclient.SSHContext, path string, ws *websocket.Con
 				"fileHash": fileHash,
 				"status":   "in-progress",
 				"path":     path,
+				"writable": writable,
 				"content":  base64.StdEncoding.EncodeToString(buf[:n]),
 			}
 			msg := createMessage(ActionGetFileContents, toJSON(chunkData))
@@ -157,6 +160,7 @@ func streamFileContent(ctx *sshclient.SSHContext, path string, ws *websocket.Con
 		"fileHash": fileHash,
 		"status":   "complete",
 		"path":     path,
+		"writable": writable,
 		"content":  nil,
 	}
 	ws.WriteMessage(websocket.TextMessage, createMessage(ActionGetFileContents, toJSON(finalChunk)))
