@@ -132,15 +132,26 @@ func streamFileContent(ctx *sshclient.SSHContext, path string, ws *websocket.Con
 
 	writable := ctx.CheckWritePermission(path)
 
+	// SHA-256 체크섬 계산기 초기화
+	hash := sha256.New()
+
 	buf := make([]byte, 4096)
 	for {
 		n, err := file.Read(buf)
 		if n > 0 {
+			// 데이터 청크를 해시 계산에 추가
+			if _, hashErr := hash.Write(buf[:n]); hashErr != nil {
+				log.Println("Hash calculation error:", hashErr)
+				sendError(ws, "Hash calculation error")
+				return
+			}
+
 			chunkData := map[string]interface{}{
 				"fileHash": fileHash,
 				"status":   "in-progress",
-				"path":     path,
-				"writable": writable,
+				"path":     nil,
+				"writable": nil,
+				"checksum": nil,
 				"content":  base64.StdEncoding.EncodeToString(buf[:n]),
 			}
 			msg := createMessage(ActionGetFileContents, toJSON(chunkData))
@@ -156,12 +167,15 @@ func streamFileContent(ctx *sshclient.SSHContext, path string, ws *websocket.Con
 			return
 		}
 	}
+	finalHash := hash.Sum(nil)
+
 	finalChunk := map[string]interface{}{
 		"fileHash": fileHash,
 		"status":   "complete",
 		"path":     path,
 		"writable": writable,
 		"content":  nil,
+		"checksum": fmt.Sprintf("%x", finalHash),
 	}
 	ws.WriteMessage(websocket.TextMessage, createMessage(ActionGetFileContents, toJSON(finalChunk)))
 }
