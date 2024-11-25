@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"path"
+	"sync"
 	"time"
 
 	"sshbck/pkg/sshclient"
@@ -26,7 +27,19 @@ const (
 	ActionGetFileList     = "getfilelist"
 	ActionGetFileContents = "getfilecontents"
 	ActionGetGroups       = "getgroups"
+	ActionSaveFileChunk   = "savefilechunk"
 )
+
+type SafeWebSocket struct {
+	Conn  *websocket.Conn
+	Mutex sync.Mutex
+}
+
+func (ws *SafeWebSocket) WriteMessage(messageType int, data []byte) error {
+	ws.Mutex.Lock()
+	defer ws.Mutex.Unlock()
+	return ws.Conn.WriteMessage(messageType, data)
+}
 
 // Json 변환
 func toJSON(data map[string]interface{}) []byte {
@@ -54,7 +67,7 @@ func createMessage(action string, data []byte) []byte {
 }
 
 // SSH 및 SFTP 연결 설정
-func setupSSHSFTP(ctx *sshclient.SSHContext, config map[string]interface{}, wsConn *websocket.Conn) {
+func setupSSHSFTP(ctx *sshclient.SSHContext, config map[string]interface{}, wsConn *SafeWebSocket) {
 	addr := config["host"].(string) + ":" + config["port"].(string)
 	cols := int(config["cols"].(float64))
 	rows := int(config["rows"].(float64))
@@ -121,7 +134,7 @@ func generateUniqueHash(filePath string) string {
 }
 
 // 파일 콘텐츠를 청크 단위로 읽어 전송
-func streamFileContent(ctx *sshclient.SSHContext, path string, ws *websocket.Conn) {
+func streamFileContent(ctx *sshclient.SSHContext, path string, ws *SafeWebSocket) {
 	fileHash := generateUniqueHash(path)
 	file, err := ctx.SFTPClient.Open(path)
 	if err != nil {
@@ -136,6 +149,7 @@ func streamFileContent(ctx *sshclient.SSHContext, path string, ws *websocket.Con
 	hash := sha256.New()
 
 	buf := make([]byte, 4096)
+	idx := 0
 	for {
 		n, err := file.Read(buf)
 		if n > 0 {
@@ -152,6 +166,7 @@ func streamFileContent(ctx *sshclient.SSHContext, path string, ws *websocket.Con
 				"path":     nil,
 				"writable": nil,
 				"checksum": nil,
+				"index":    idx,
 				"content":  base64.StdEncoding.EncodeToString(buf[:n]),
 			}
 			msg := createMessage(ActionGetFileContents, toJSON(chunkData))
@@ -166,6 +181,8 @@ func streamFileContent(ctx *sshclient.SSHContext, path string, ws *websocket.Con
 			log.Println("File read error:", err)
 			return
 		}
+
+		idx++
 	}
 	finalHash := hash.Sum(nil)
 
@@ -174,14 +191,19 @@ func streamFileContent(ctx *sshclient.SSHContext, path string, ws *websocket.Con
 		"status":   "complete",
 		"path":     path,
 		"writable": writable,
+		"index":    idx,
 		"content":  nil,
 		"checksum": fmt.Sprintf("%x", finalHash),
 	}
-	ws.WriteMessage(websocket.TextMessage, createMessage(ActionGetFileContents, toJSON(finalChunk)))
+	err = ws.WriteMessage(websocket.TextMessage, createMessage(ActionGetFileContents, toJSON(finalChunk)))
+
+	if err != nil {
+		log.Println("websocket write error:", err)
+	}
 }
 
 // WebSocket을 통해 오류 메시지 전송
-func sendError(ws *websocket.Conn, errorMsg string) {
+func sendError(ws *SafeWebSocket, errorMsg string) {
 	log.Println(errorMsg)
 	message := createMessage(ActionTerminal, []byte("ERROR: "+errorMsg+"\n"))
 	ws.WriteMessage(websocket.TextMessage, message)
@@ -202,6 +224,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	safeWS := &SafeWebSocket{Conn: conn}
 	ctx := sshclient.NewSSHContext()
 	done := make(chan struct{})
 
@@ -232,7 +255,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 						for {
 							if ctx.Queue.Len() > 0 {
 								data := createMessage(ActionTerminal, ctx.Queue.Pop().([]byte))
-								if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+								if err := safeWS.WriteMessage(websocket.TextMessage, data); err != nil {
 									log.Println("WebSocket write error:", err)
 									return
 								}
@@ -242,7 +265,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 						}
 					}()
 
-					go setupSSHSFTP(ctx, requestData, conn)
+					go setupSSHSFTP(ctx, requestData, safeWS)
 				case ActionTerminal:
 					termMsg := requestData["data"].(string)
 					if ctx.Stdin == nil {
@@ -256,7 +279,30 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				case ActionResize:
 					resizePTY(ctx.Session, requestData)
 				case ActionGetFileContents:
-					go streamFileContent(ctx, requestData["path"].(string), conn)
+					go streamFileContent(ctx, requestData["path"].(string), safeWS)
+				case ActionSaveFileChunk:
+					path := requestData["path"].(string)
+					content, _ := base64.StdEncoding.DecodeString(requestData["content"].(string))
+					isFirstChunk := requestData["isFirstChunk"].(bool)
+					isLastChunk := requestData["isLastChunk"].(bool)
+					checksum, _ := requestData["checksum"].(string)
+
+					data := map[string]interface{}{
+						"path":   path,
+						"status": "failed",
+					}
+
+					err := ctx.SaveFileChunkWithChecksum(path, content, isFirstChunk, isLastChunk, checksum)
+					if err != nil {
+						log.Println("File Write Error: ", err)
+					} else if isLastChunk {
+						data = map[string]interface{}{
+							"path":   path,
+							"status": "success",
+						}
+					}
+
+					safeWS.WriteMessage(websocket.TextMessage, createMessage(ActionSaveFileChunk, toJSON(data)))
 				case ActionGetFileList:
 					root := requestData["root"].(string)
 					if root == "HOME_DIR" {
@@ -271,7 +317,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 						"parent":   path.Clean(root),
 						"fileTree": files,
 					}
-					conn.WriteMessage(websocket.TextMessage, createMessage(ActionGetFileList, toJSON(data)))
+					safeWS.WriteMessage(websocket.TextMessage, createMessage(ActionGetFileList, toJSON(data)))
 				case ActionGetGroups:
 					groups, err := ctx.GetGroups()
 					if err != nil {
@@ -279,7 +325,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 						continue
 					}
 
-					conn.WriteMessage(websocket.TextMessage, createMessage(ActionGetGroups, toJSON(map[string]interface{}{"groups": groups})))
+					safeWS.WriteMessage(websocket.TextMessage, createMessage(ActionGetGroups, toJSON(map[string]interface{}{"groups": groups})))
 				default:
 					log.Println("Unsupported action:", action)
 				}

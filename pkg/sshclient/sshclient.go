@@ -156,6 +156,56 @@ func (ctx *SSHContext) GetFile(path string) (*sftp.File, error) {
 	return file, nil
 }
 
+// 원격 SSH Server에 파일 쓰기
+func (ctx *SSHContext) SaveFileChunkWithChecksum(path string, content []byte, isFirstChunk bool, isLastChunk bool, checksum string) error {
+	tmpPath := "/tmp/" + strings.ReplaceAll(path, "/", "_") + ".tmp"
+	var file *sftp.File
+	var err error
+
+	if isFirstChunk {
+		file, err = ctx.SFTPClient.Create(tmpPath)
+	} else {
+		file, err = ctx.SFTPClient.OpenFile(tmpPath, os.O_WRONLY|os.O_APPEND)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to open file: %v", err)
+	}
+	defer file.Close()
+
+	_, err = file.Write(content)
+	if err != nil {
+		return fmt.Errorf("faild to write content: %v", err)
+	}
+
+	if isLastChunk {
+		cmd := fmt.Sprintf("sha256sum %s | awk '{print $1}'", tmpPath)
+		tmpFileChecksum, err := ctx.ExecuteCommand(cmd)
+		if err != nil {
+			return fmt.Errorf("failed to execute checksum command : %v", err)
+		}
+
+		if strings.TrimSpace(tmpFileChecksum) == strings.TrimSpace(checksum) {
+			cmd := fmt.Sprintf("cp -f %s %s", tmpPath, path)
+			_, err := ctx.ExecuteCommand(cmd)
+			if err != nil {
+				return fmt.Errorf("failed to overwrite file : %v", err)
+			}
+
+			cmd = fmt.Sprintf("rm -f %s", tmpPath)
+			_, err = ctx.ExecuteCommand(cmd)
+			if err != nil {
+				return fmt.Errorf("failed to remove file : %v", err)
+			}
+
+		} else {
+			return fmt.Errorf("failed to write file (missmatch checksum) : %v", err)
+		}
+	}
+
+	return nil
+}
+
 // 특정 경로의 파일 목록을 반환
 func (ctx *SSHContext) GetFileList(root string) ([]FileInfo, error) {
 	var filesList []FileInfo
