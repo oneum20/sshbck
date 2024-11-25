@@ -2,6 +2,7 @@ package sshclient
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -72,26 +73,32 @@ func (cfg Config) NewSession(conn *ssh.Client) (*ssh.Session, error) {
 }
 
 // Stdout를 지속적으로 읽고 출력 내용을 Queue에 추가
-func (ctx *SSHContext) Read() {
+func (sshCtx *SSHContext) Read(ctx context.Context) {
 	buf := make([]byte, 1024)
 	for {
-		n, err := ctx.Stdout.Read(buf)
-		if err != nil && err != io.EOF {
-			log.Println("I/O read error:", err)
+		select {
+		case <-ctx.Done():
+			log.Println("Read context done")
 			return
-		}
-		if n > 0 {
-			ctx.Queue.Push(buf[:n])
-			buf = make([]byte, 1024) // Clear buffer
+		default:
+			n, err := sshCtx.Stdout.Read(buf)
+			if err != nil && err != io.EOF {
+				log.Println("I/O read error:", err)
+				return
+			}
+			if n > 0 {
+				sshCtx.Queue.Push(buf[:n])
+				buf = make([]byte, 1024) // Clear buffer
+			}
 		}
 	}
 }
 
 // SSH 명령 실행
-func (ctx *SSHContext) ExecuteCommand(cmd string) (string, error) {
+func (sshCtx *SSHContext) ExecuteCommand(cmd string) (string, error) {
 	var stdoutBuf bytes.Buffer
 
-	session, err := ctx.Client.NewSession()
+	session, err := sshCtx.Client.NewSession()
 	if err != nil {
 		return "", err
 	}
@@ -105,42 +112,42 @@ func (ctx *SSHContext) ExecuteCommand(cmd string) (string, error) {
 }
 
 // UID와 GID를 사용자와 그룹 이름으로 변환하여 캐시에 저장
-func (ctx *SSHContext) getOwnerGroupName(uid, gid uint32) (string, string) {
-	ctx.cacheMutex.Lock()
-	defer ctx.cacheMutex.Unlock()
+func (sshCtx *SSHContext) getOwnerGroupName(uid, gid uint32) (string, string) {
+	sshCtx.cacheMutex.Lock()
+	defer sshCtx.cacheMutex.Unlock()
 
 	// UID가 캐시에 있는지 확인
-	ownerName, found := ctx.userCache[uid]
+	ownerName, found := sshCtx.userCache[uid]
 	if !found {
 		ownerCmd := fmt.Sprintf("getent passwd %d | cut -d: -f1", uid)
-		ownerName, err := ctx.ExecuteCommand(ownerCmd)
+		ownerName, err := sshCtx.ExecuteCommand(ownerCmd)
 		if err != nil {
 			log.Printf("Failed to get owner name for UID %d: %v", uid, err)
 			ownerName = fmt.Sprintf("%d", uid)
 		}
 		ownerName = strings.TrimSpace(ownerName)
-		ctx.userCache[uid] = ownerName
+		sshCtx.userCache[uid] = ownerName
 	}
 
 	// GID가 캐시에 있는지 확인
-	groupName, found := ctx.groupCache[gid]
+	groupName, found := sshCtx.groupCache[gid]
 	if !found {
 		groupCmd := fmt.Sprintf("getent group %d | cut -d: -f1", gid)
-		groupName, err := ctx.ExecuteCommand(groupCmd)
+		groupName, err := sshCtx.ExecuteCommand(groupCmd)
 		if err != nil {
 			log.Printf("Failed to get group name for GID %d: %v", gid, err)
 			groupName = fmt.Sprintf("%d", gid)
 		}
 		groupName = strings.TrimSpace(groupName)
-		ctx.groupCache[gid] = groupName
+		sshCtx.groupCache[gid] = groupName
 	}
 
 	return ownerName, groupName
 }
 
 // 홈 디렉토리 반환
-func (ctx *SSHContext) HomeDir() (string, error) {
-	homeDir, err := ctx.ExecuteCommand("pwd")
+func (sshCtx *SSHContext) HomeDir() (string, error) {
+	homeDir, err := sshCtx.ExecuteCommand("pwd")
 	if err != nil {
 		return "", err
 	}
@@ -148,8 +155,8 @@ func (ctx *SSHContext) HomeDir() (string, error) {
 }
 
 // SFTP를 이용하여 파일 읽기
-func (ctx *SSHContext) GetFile(path string) (*sftp.File, error) {
-	file, err := ctx.SFTPClient.Open(path)
+func (sshCtx *SSHContext) GetFile(path string) (*sftp.File, error) {
+	file, err := sshCtx.SFTPClient.Open(path)
 	if err != nil {
 		return nil, err
 	}
@@ -157,15 +164,15 @@ func (ctx *SSHContext) GetFile(path string) (*sftp.File, error) {
 }
 
 // 원격 SSH Server에 파일 쓰기
-func (ctx *SSHContext) SaveFileChunkWithChecksum(path string, content []byte, isFirstChunk bool, isLastChunk bool, checksum string) error {
+func (sshCtx *SSHContext) SaveFileChunkWithChecksum(path string, content []byte, isFirstChunk bool, isLastChunk bool, checksum string) error {
 	tmpPath := "/tmp/" + strings.ReplaceAll(path, "/", "_") + ".tmp"
 	var file *sftp.File
 	var err error
 
 	if isFirstChunk {
-		file, err = ctx.SFTPClient.Create(tmpPath)
+		file, err = sshCtx.SFTPClient.Create(tmpPath)
 	} else {
-		file, err = ctx.SFTPClient.OpenFile(tmpPath, os.O_WRONLY|os.O_APPEND)
+		file, err = sshCtx.SFTPClient.OpenFile(tmpPath, os.O_WRONLY|os.O_APPEND)
 	}
 
 	if err != nil {
@@ -180,20 +187,20 @@ func (ctx *SSHContext) SaveFileChunkWithChecksum(path string, content []byte, is
 
 	if isLastChunk {
 		cmd := fmt.Sprintf("sha256sum %s | awk '{print $1}'", tmpPath)
-		tmpFileChecksum, err := ctx.ExecuteCommand(cmd)
+		tmpFileChecksum, err := sshCtx.ExecuteCommand(cmd)
 		if err != nil {
 			return fmt.Errorf("failed to execute checksum command : %v", err)
 		}
 
 		if strings.TrimSpace(tmpFileChecksum) == strings.TrimSpace(checksum) {
 			cmd := fmt.Sprintf("cp -f %s %s", tmpPath, path)
-			_, err := ctx.ExecuteCommand(cmd)
+			_, err := sshCtx.ExecuteCommand(cmd)
 			if err != nil {
 				return fmt.Errorf("failed to overwrite file : %v", err)
 			}
 
 			cmd = fmt.Sprintf("rm -f %s", tmpPath)
-			_, err = ctx.ExecuteCommand(cmd)
+			_, err = sshCtx.ExecuteCommand(cmd)
 			if err != nil {
 				return fmt.Errorf("failed to remove file : %v", err)
 			}
@@ -207,16 +214,16 @@ func (ctx *SSHContext) SaveFileChunkWithChecksum(path string, content []byte, is
 }
 
 // 특정 경로의 파일 목록을 반환
-func (ctx *SSHContext) GetFileList(root string) ([]FileInfo, error) {
+func (sshCtx *SSHContext) GetFileList(root string) ([]FileInfo, error) {
 	var filesList []FileInfo
-	files, err := ctx.SFTPClient.ReadDir(root)
+	files, err := sshCtx.SFTPClient.ReadDir(root)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, file := range files {
 		stat := file.Sys().(*sftp.FileStat)
-		ownerName, groupName := ctx.getOwnerGroupName(stat.UID, stat.GID)
+		ownerName, groupName := sshCtx.getOwnerGroupName(stat.UID, stat.GID)
 		perm := file.Mode().Perm().String()
 
 		fileInfo := FileInfo{
@@ -234,8 +241,8 @@ func (ctx *SSHContext) GetFileList(root string) ([]FileInfo, error) {
 }
 
 // 특정 사용자가 속한 그룹 목록 조회
-func (ctx *SSHContext) GetGroups() ([]string, error) {
-	groupsStr, err := ctx.ExecuteCommand("groups")
+func (sshCtx *SSHContext) GetGroups() ([]string, error) {
+	groupsStr, err := sshCtx.ExecuteCommand("groups")
 	if err != nil {
 		return nil, err
 	}
@@ -243,8 +250,8 @@ func (ctx *SSHContext) GetGroups() ([]string, error) {
 }
 
 // 해당 파일에 대한 쓰기 권한 확인
-func (ctx *SSHContext) CheckWritePermission(path string) bool {
-	file, err := ctx.SFTPClient.OpenFile(path, os.O_WRONLY)
+func (sshCtx *SSHContext) CheckWritePermission(path string) bool {
+	file, err := sshCtx.SFTPClient.OpenFile(path, os.O_WRONLY)
 	if err != nil {
 		// 파일을 열 수 없으면 쓰기 권한이 없음
 		return false
