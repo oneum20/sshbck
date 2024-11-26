@@ -1,106 +1,147 @@
 package websocket
 
 import (
+	"context"
 	"encoding/base64"
-	"encoding/json"
 	"log"
 	"net/http"
-	"time"
+	"sync"
 
-	"sshbck/pkg/queue"
 	"sshbck/pkg/sshclient"
 
 	"github.com/gorilla/websocket"
-	"golang.org/x/crypto/ssh"
 )
 
-// Action
+// 상수 정의
 const (
-	ActionConnect  = "connection"
-	ActionResize   = "resize"
-	ActionTerminal = "terminal"
+	ActionConnect         Action = "connection"
+	ActionResize          Action = "resize"
+	ActionTerminal        Action = "terminal"
+	ActionGetFileList     Action = "getfilelist"
+	ActionGetFileContents Action = "getfilecontents"
+	ActionGetGroups       Action = "getgroups"
+	ActionSaveFileChunk   Action = "savefilechunk"
+	ActionAddFile         Action = "addfile"
+	ActionRemoveFile      Action = "removefile"
 )
 
-func isJson(s []byte) bool {
-	var js map[string]interface{}
-	return json.Unmarshal([]byte(s), &js) == nil
-}
+// 타입 정의
+type (
+	Action string
+	Status string
+)
 
-func handleMessage(action string, data []byte) []byte {
-	message, err := json.Marshal(map[string]interface{}{
-		"action": action,
-		"data":   base64.StdEncoding.EncodeToString(data),
-	})
+type (
+	WSMessage struct {
+		Action Action                 `json:"action"`
+		Data   map[string]interface{} `json:"data"`
+		Status Status                 `json:"status"`
+		Error  string                 `json:"error,omitempty"`
+	}
 
-	if err != nil {
-		log.Println("json marshal error: ", err)
-		return nil
-	} else {
-		return message
+	WSError struct {
+		Message string `json:"message"`
+	}
+)
+
+type (
+	SafeWebSocket struct {
+		Conn  *websocket.Conn
+		Mutex sync.Mutex
+	}
+
+	WSHandlerContext struct {
+		ctx    context.Context
+		ssh    *sshclient.SSHContext
+		safeWS *SafeWebSocket
+		done   chan struct{}
+		cancel context.CancelFunc
+	}
+)
+
+const (
+	StatusSuccess    Status = "success"
+	StatusFailed     Status = "failed"
+	StatusInProgress Status = "in-progress"
+)
+
+func newWSHandlerContext(ws *SafeWebSocket) *WSHandlerContext {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &WSHandlerContext{
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
+		ssh:    sshclient.NewSSHContext(),
+		safeWS: ws,
 	}
 }
 
-// setup ssh connection
-func setupSSH(sbf *sshclient.SSHContext, scf map[string]interface{}, ws *websocket.Conn) {
-	log.Println("connection info : ", scf)
-	addr := scf["host"].(string) + ":" + scf["port"].(string)
-	cols := int(scf["cols"].(float64))
-	rows := int(scf["rows"].(float64))
-
-	serverConfig := &ssh.ClientConfig{
-		User: scf["username"].(string),
-		Auth: []ssh.AuthMethod{
-			ssh.Password(scf["password"].(string)),
-		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	}
-	config := sshclient.Config{
-		ServerConfig: serverConfig,
-		Protocol:     "tcp",
-		Addr:         addr,
-	}
-
-	conn, err := config.NewConn()
-	if err != nil {
-		log.Println(err)
-		ws.WriteMessage(websocket.TextMessage, handleMessage(ActionTerminal, []byte("ERROR : "+err.Error()+"\n\r")))
-		return
-	}
-	defer conn.Close()
-
-	session, err := config.NewSession(conn)
-	if err != nil {
-		log.Println(err)
-		ws.WriteMessage(websocket.TextMessage, handleMessage(ActionTerminal, []byte("ERROR : "+err.Error()+"\n\r")))
-		return
-	}
-	defer session.Close()
-
-	session.RequestPty("xterm", rows, cols, ssh.TerminalModes{})
-
-	sbf.Client = conn
-	sbf.Session = session
-	sbf.Stdin, _ = session.StdinPipe()
-	sbf.Stdout, _ = session.StdoutPipe()
-
-	go sbf.Read()
-
-	session.Shell()
-	session.Wait()
+// 기본 메시지 전송
+func (ws *SafeWebSocket) WriteMessage(messageType int, data []byte) error {
+	ws.Mutex.Lock()
+	defer ws.Mutex.Unlock()
+	return ws.Conn.WriteMessage(messageType, []byte(base64.StdEncoding.EncodeToString(data)))
 }
 
-func ptyResize(session *ssh.Session, data map[string]interface{}) {
-	cols := int(data["cols"].(float64))
-	rows := int(data["rows"].(float64))
-
-	// session.RequestPty("xterm", rows, cols, ssh.TerminalModes{})
-	session.WindowChange(rows, cols)
+// JSON 데이터 전송
+func (ws *SafeWebSocket) WriteJSON(data []byte) error {
+	ws.Mutex.Lock()
+	defer ws.Mutex.Unlock()
+	return ws.Conn.WriteJSON(data)
 }
 
-func runCmd(sbf *sshclient.SSHContext, data map[string]interface{}) (string, error) {
-	command := string(data["cmd"].(string))
+// WebSocket을 통해 오류 메시지 전송
+func (ws *SafeWebSocket) SendError(msg WSMessage) {
+	message := createMessage(string(msg.Action), nil, msg.Status, msg.Error)
+	ws.WriteJSON(message)
+}
 
-	return sbf.ExecuteCommand(command)
+// 메시지 핸들러 맵
+var messageHandlers = map[Action]messageHandler{
+	ActionConnect:         handleConnect,
+	ActionResize:          handleResize,
+	ActionTerminal:        handleTerminal,
+	ActionGetFileContents: handleGetFileContents,
+	ActionSaveFileChunk:   handleSaveFileChunk,
+	ActionGetFileList:     handleGetFileList,
+	ActionGetGroups:       handleGetGroups,
+	ActionAddFile:         handleAddFile,
+	ActionRemoveFile:      handleRemoveFile,
+}
+
+// 메시지 라우터 설정
+func setupMessageRouter() *messageRouter {
+	router := NewMessageRouter()
+
+	for action, handler := range messageHandlers {
+		router.RegisterHandler(action, handler)
+	}
+
+	return router
+}
+
+func handleMessages(wsCtx *WSHandlerContext, router *messageRouter) {
+	defer func() {
+		log.Println("handleMessages done")
+		close(wsCtx.done)
+		wsCtx.cancel()
+	}()
+
+	for {
+		var msg WSMessage
+		err := wsCtx.safeWS.Conn.ReadJSON(&msg)
+		if err != nil {
+			log.Println("Read error:", err)
+			return
+		}
+
+		if err := router.Route(wsCtx, msg); err != nil {
+			log.Println("Route error:", err)
+			msg.Status = StatusFailed
+			msg.Error = err.Error()
+			wsCtx.safeWS.SendError(msg)
+		}
+	}
 }
 
 var upgrader = websocket.Upgrader{
@@ -109,7 +150,7 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-// websocket handler
+// WebSocket handler
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -118,75 +159,11 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	sbf := &sshclient.SSHContext{Q: queue.NewQueue()}
+	wsCtx := newWSHandlerContext(&SafeWebSocket{Conn: conn})
 
-	done := make(chan struct{})
-	for {
-		select {
-		case <-done:
-			log.Println("Websocket connection close")
-			return
-		default:
-			_, msg, err := conn.ReadMessage()
-			if err != nil {
-				log.Println("Read error:", err)
-				return
-			}
+	go handleMessages(wsCtx, setupMessageRouter())
 
-			if isJson(msg) {
-				var data map[string]interface{}
-				if err := json.Unmarshal(msg, &data); err != nil {
-					log.Println("json parsing error: ", err)
-					continue
-				}
+	<-wsCtx.done
 
-				action, ok := data["action"].(string)
-				if !ok {
-					log.Println("action value is not a string : ", action)
-					continue
-				}
-
-				switch action {
-				case ActionConnect:
-					go func() {
-						defer close(done)
-
-						for {
-							if sbf.Q.Len() > 0 {
-								data := handleMessage(ActionTerminal, sbf.Q.Pop().([]byte))
-								err := conn.WriteMessage(websocket.TextMessage, data)
-								if err != nil {
-									log.Println("websocket write error : ", err)
-									return
-								}
-							} else {
-								// log.Println("any goroutin")
-								time.Sleep(100 * time.Millisecond) // 루프 내에서 대기 추가
-							}
-						}
-
-					}()
-
-					go setupSSH(sbf, data, conn)
-				case ActionResize:
-					ptyResize(sbf.Session, data)
-				case ActionTerminal:
-					terminalMessage := data["data"].(string)
-
-					if sbf.Stdin == nil {
-						log.Println(">> Stdin is nil : ", msg)
-						continue
-					}
-					if _, err := sbf.Stdin.Write([]byte(terminalMessage)); err != nil {
-						log.Println("Write error:", err)
-						return
-					}
-				default:
-					log.Println("not supported action : ", action)
-				}
-			}
-		}
-
-	}
-
+	log.Println("HandleWebSocket done")
 }
