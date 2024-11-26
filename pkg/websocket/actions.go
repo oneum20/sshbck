@@ -22,7 +22,7 @@ func handleConnect(wsCtx *WSHandlerContext, requestData map[string]interface{}) 
 				return
 			default:
 				if wsCtx.ssh.Queue.Len() > 0 {
-					data := createMessage(string(ActionTerminal), wsCtx.ssh.Queue.Pop().([]byte))
+					data := createMessage(string(ActionTerminal), wsCtx.ssh.Queue.Pop().([]byte), StatusSuccess, "")
 					if err := wsCtx.safeWS.WriteMessage(websocket.TextMessage, data); err != nil {
 						log.Println("WebSocket write error:", err)
 						return
@@ -42,7 +42,11 @@ func handleConnect(wsCtx *WSHandlerContext, requestData map[string]interface{}) 
 
 // 터미널 리사이즈
 func handleResize(wsCtx *WSHandlerContext, requestData map[string]interface{}) error {
-	resizePTY(wsCtx.ssh.Session, requestData)
+	if err := resizePTY(wsCtx.ssh.Session, requestData); err != nil {
+		return errors.New("resize error: " + err.Error())
+	}
+
+	wsCtx.safeWS.WriteJSON(createMessage(string(ActionResize), nil, StatusSuccess, ""))
 	return nil
 }
 
@@ -69,15 +73,16 @@ func handleGetGroups(wsCtx *WSHandlerContext, requestData map[string]interface{}
 		return errors.New("json marshal error: " + err.Error())
 	}
 
-	wsCtx.safeWS.WriteJSON(createMessage(string(ActionGetGroups), msg))
+	wsCtx.safeWS.WriteJSON(createMessage(string(ActionGetGroups), msg, StatusSuccess, ""))
 	return nil
 }
 
 // terminal pty 리사이즈
-func resizePTY(session *ssh.Session, data map[string]interface{}) {
+func resizePTY(session *ssh.Session, data map[string]interface{}) error {
 	cols := int(data["cols"].(float64))
 	rows := int(data["rows"].(float64))
-	session.WindowChange(rows, cols)
+
+	return session.WindowChange(rows, cols)
 }
 
 // SSH 및 SFTP 연결 설정

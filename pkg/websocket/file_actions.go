@@ -23,6 +23,12 @@ type FileChunk struct {
 	Checksum string `json:"checksum"`
 }
 
+const (
+	FileStatusInProgress Status = "in-progress"
+	FileStatusSuccess    Status = "success"
+	FileStatusFailed     Status = "failed"
+)
+
 // 파일 목록 조회
 func handleGetFileList(wsCtx *WSHandlerContext, requestData map[string]interface{}) error {
 	root := requestData["root"].(string)
@@ -45,7 +51,7 @@ func handleGetFileList(wsCtx *WSHandlerContext, requestData map[string]interface
 		return errors.New("json marshal error: " + err.Error())
 	}
 
-	wsCtx.safeWS.WriteJSON(createMessage(string(ActionGetFileList), msg))
+	wsCtx.safeWS.WriteJSON(createMessage(string(ActionGetFileList), msg, StatusSuccess, ""))
 	return nil
 }
 
@@ -70,8 +76,7 @@ func handleSaveFileChunk(wsCtx *WSHandlerContext, requestData map[string]interfa
 	}
 
 	data := map[string]interface{}{
-		"path":   path,
-		"status": StatusSuccess,
+		"path": path,
 	}
 
 	msg, err := toJSON(data)
@@ -79,7 +84,31 @@ func handleSaveFileChunk(wsCtx *WSHandlerContext, requestData map[string]interfa
 		return errors.New("json marshal error: " + err.Error())
 	}
 
-	wsCtx.safeWS.WriteJSON(createMessage(string(ActionSaveFileChunk), msg))
+	wsCtx.safeWS.WriteJSON(createMessage(string(ActionSaveFileChunk), msg, StatusSuccess, ""))
+	return nil
+}
+
+// 파일 추가
+func handleAddFile(wsCtx *WSHandlerContext, requestData map[string]interface{}) error {
+	parentPath := requestData["parentPath"].(string)
+	filename := requestData["filename"].(string)
+	if err := wsCtx.ssh.AddFile(parentPath + "/" + filename); err != nil {
+		return errors.New("file add error: " + err.Error())
+	}
+
+	wsCtx.safeWS.WriteJSON(createMessage(string(ActionAddFile), nil, StatusSuccess, ""))
+	return nil
+}
+
+// 파일 삭제
+func handleRemoveFile(wsCtx *WSHandlerContext, requestData map[string]interface{}) error {
+	log.Println("handleRemoveFile", requestData)
+	path := requestData["fullPath"].(string)
+	if err := wsCtx.ssh.RemoveFile(path); err != nil {
+		return errors.New("file remove error: " + err.Error())
+	}
+
+	wsCtx.safeWS.WriteJSON(createMessage(string(ActionRemoveFile), nil, StatusSuccess, ""))
 	return nil
 }
 
@@ -106,12 +135,11 @@ func streamFileContent(wsCtx *WSHandlerContext, path string) {
 			// 데이터 청크를 해시 계산에 추가
 			if _, hashErr := hash.Write(buf[:n]); hashErr != nil {
 				log.Println("Hash calculation error:", hashErr)
-				sendError(wsCtx.safeWS, "Hash calculation error")
 				return
 			}
 			chunkData := FileChunk{
 				FileHash: fileHash,
-				Status:   StatusInProgress,
+				Status:   FileStatusInProgress,
 				Path:     path,
 				Writable: writable,
 				Checksum: "",
@@ -124,7 +152,7 @@ func streamFileContent(wsCtx *WSHandlerContext, path string) {
 				return
 			}
 
-			if err := wsCtx.safeWS.WriteMessage(websocket.TextMessage, createMessage(string(ActionGetFileContents), msg)); err != nil {
+			if err := wsCtx.safeWS.WriteMessage(websocket.TextMessage, createMessage(string(ActionGetFileContents), msg, StatusSuccess, "")); err != nil {
 				log.Println("WebSocket write error:", err)
 				return
 			}
@@ -142,7 +170,7 @@ func streamFileContent(wsCtx *WSHandlerContext, path string) {
 
 	finalChunk := FileChunk{
 		FileHash: fileHash,
-		Status:   StatusSuccess,
+		Status:   FileStatusSuccess,
 		Path:     path,
 		Writable: writable,
 		Index:    idx,
@@ -154,7 +182,7 @@ func streamFileContent(wsCtx *WSHandlerContext, path string) {
 		log.Println("JSON marshal error:", err)
 		return
 	}
-	err = wsCtx.safeWS.WriteMessage(websocket.TextMessage, createMessage(string(ActionGetFileContents), msg))
+	err = wsCtx.safeWS.WriteMessage(websocket.TextMessage, createMessage(string(ActionGetFileContents), msg, StatusSuccess, ""))
 
 	if err != nil {
 		log.Println("websocket write error:", err)

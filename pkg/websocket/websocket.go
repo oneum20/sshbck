@@ -21,6 +21,8 @@ const (
 	ActionGetFileContents Action = "getfilecontents"
 	ActionGetGroups       Action = "getgroups"
 	ActionSaveFileChunk   Action = "savefilechunk"
+	ActionAddFile         Action = "addfile"
+	ActionRemoveFile      Action = "removefile"
 )
 
 // 타입 정의
@@ -33,6 +35,8 @@ type (
 	WSMessage struct {
 		Action Action                 `json:"action"`
 		Data   map[string]interface{} `json:"data"`
+		Status Status                 `json:"status"`
+		Error  string                 `json:"error,omitempty"`
 	}
 
 	WSError struct {
@@ -87,10 +91,9 @@ func (ws *SafeWebSocket) WriteJSON(data []byte) error {
 }
 
 // WebSocket을 통해 오류 메시지 전송
-func sendError(ws *SafeWebSocket, errorMsg string) {
-	log.Println(errorMsg)
-	message := createMessage(string(ActionTerminal), []byte("ERROR: "+errorMsg+"\n"))
-	ws.WriteMessage(websocket.TextMessage, message)
+func (ws *SafeWebSocket) SendError(msg WSMessage) {
+	message := createMessage(string(msg.Action), nil, msg.Status, msg.Error)
+	ws.WriteJSON(message)
 }
 
 // 메시지 핸들러 맵
@@ -102,6 +105,8 @@ var messageHandlers = map[Action]messageHandler{
 	ActionSaveFileChunk:   handleSaveFileChunk,
 	ActionGetFileList:     handleGetFileList,
 	ActionGetGroups:       handleGetGroups,
+	ActionAddFile:         handleAddFile,
+	ActionRemoveFile:      handleRemoveFile,
 }
 
 // 메시지 라우터 설정
@@ -132,7 +137,9 @@ func handleMessages(wsCtx *WSHandlerContext, router *messageRouter) {
 
 		if err := router.Route(wsCtx, msg); err != nil {
 			log.Println("Route error:", err)
-			sendError(wsCtx.safeWS, err.Error())
+			msg.Status = StatusFailed
+			msg.Error = err.Error()
+			wsCtx.safeWS.SendError(msg)
 		}
 	}
 }

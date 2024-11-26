@@ -240,6 +240,23 @@ func (sshCtx *SSHContext) GetFileList(root string) ([]FileInfo, error) {
 	return filesList, nil
 }
 
+// 파일 추가
+func (sshCtx *SSHContext) AddFile(path string) error {
+	if _, err := sshCtx.ExecuteCommand(fmt.Sprintf("touch %s", path)); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// 파일 삭제
+func (sshCtx *SSHContext) RemoveFile(path string) error {
+	if _, err := sshCtx.ExecuteCommand(fmt.Sprintf("rm -f %s", path)); err != nil {
+		return err
+	}
+	return nil
+}
+
 // 특정 사용자가 속한 그룹 목록 조회
 func (sshCtx *SSHContext) GetGroups() ([]string, error) {
 	groupsStr, err := sshCtx.ExecuteCommand("groups")

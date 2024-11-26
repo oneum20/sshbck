@@ -20,10 +20,12 @@ func generateUniqueHash(filePath string) string {
 }
 
 // WebSocket 메시지 생성 함수
-func createMessage(action string, data []byte) []byte {
+func createMessage(action string, data []byte, status Status, error string) []byte {
 	message, err := json.Marshal(map[string]interface{}{
 		"action": action,
 		"data":   data, // Marshal 함수로 인해, []byte가 base64 인코딩 됨
+		"status": status,
+		"error":  error,
 	})
 	if err != nil {
 		log.Println("JSON marshal error:", err)
